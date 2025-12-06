@@ -36,12 +36,8 @@ O presente projeto insere-se no âmbito do desenvolvimento da aplicação princi
 A inovação desta fase reside na implementação de um controle de redimensionamento dinâmico via mouse. A aplicação C deverá permitir que o usuário utilize o mouse para definir uma região de interesse (janela) sobre a imagem original. A janela ampliada (zoom in), que deverá ser desenhada sobre a imagem original, poderá ter seu nível de ampliação controlado pelas teclas '+' (mais) e '-' (menos), proporcionando uma experiência de usuário mais interativa e precisa. O sucesso desta etapa valida a integração de periféricos complexos (como o mouse) com o módulo de processamento de imagem em tempo real, demonstrando a capacidade da solução embarcada para aplicações avançadas de visualização.
 
 
----
 
 ## 🧾Requisitos 
-
-O sistema atende aos seguintes requisitos funcionais e de interação:
-
 * *Carregamento de Imagem:* Leitura de arquivos .bmp (8-bits escala de cinza) e transferência para o coprocessador.
 * *Interface de Texto:* Exibição das coordenadas (x, y) do mouse em tempo real no terminal.
 * *Seleção de Região (Janela):*
@@ -123,6 +119,104 @@ A solução utiliza a arquitetura híbrida da DE1-SoC. O *HPS (ARM Cortex-A9)* e
     * Driver Mouse: Captura eventos brutos do USB e converte para coordenadas de tela (640x480).
 3.  *FPGA:* Processa instruções de desenho de polígonos e renderização de pixels na memória de vídeo, além de seguir executando o processamento de pixels via algoritmos pré-programados nas etapas anteriores.
 4.   *HPS:* Envio de instruções,chamadas de sistema,comunicação com dispositivos de I/O
+
+## FPGA
+
+> **Imagem Original** (HPS)  -->  **ROM** -->  **Coprocessador** (Zoom)  -->  **RAM** (Prioridade)  -->  **Monitor VGA** (ou volta para o HPS).
+
+#### **Controladora (`processo_imagem.v`)**
+É o "topo" da hierarquia e gerencia todos os recursos compartilhados.
+* **Gerenciador de Memória:** Instancia a memória de entrada (`rom_inst_OR`) e a memória de saída (`ram_inst`).
+* **Arbitro de Barramento:** Decide quem pode acessar a memória RAM num dado momento (O Coprocessador escrevendo? O HPS lendo? O VGA exibindo?).
+* **Gerador de Clock:** Usa um PLL (`pll100_inst`) para gerar clocks rápidos (100MHz) para as memórias e divide o clock para o VGA (25MHz).
+* **Driver VGA:** Instancia o módulo `vga_inst` para gerar os sinais de sincronismo (`hsync`, `vsync`) e cores para o monitor.
+
+#### **O Núcleo de Cálculo (`coprocessador.v`)**
+É o motor de processamento. Ele não sabe nada sobre VGA ou HPS, apenas recebe pixels e devolve pixels processados.
+* **Roteador de Algoritmos:** Instancia 4 módulos de processamento em paralelo:
+    1.  `replicacao_pixel`
+    2.  `media_de_blocos`
+    3.  `vizinho_proximo_in`
+    4.  `vizinho_proximo_out`.
+* **Multiplexador de Saída:** Seleciona qual resultado desses 4 módulos será entregue ao controlador, baseando-se nas chaves `SW`.
+
+### Fluxo de Controle 
+
+O fluxo de dados segue um "pipeline" com 3 estágios críticos, controlados pela lógica do arquivo `processo_imagem.v`.
+
+#### **Estágio 1: Entrada de Dados (HPS -> FPGA)**
+O HPS envia a imagem original para a FPGA.
+* **Mux de Endereço de Entrada:** Na linha 218 de `processo_imagem.v`, existe uma decisão:
+    * Se o sinal `we` (Write Enable do HPS) for **1**, o endereço da memória vem do HPS (`addr_in`).
+    * Se `we` for **0**, o endereço vem da contagem interna da FPGA (para leitura).
+* **Resultado:** A imagem original é gravada na `rom_inst_OR`.
+
+#### **Estágio 2: Processamento (ROM -> Coprocessador -> RAM)**
+Quando o HPS ativa uma chave de algoritmo (ex: `SW[0]=1`):
+1.  **Leitura:** O contador `rom_addr_counter` começa a incrementar, lendo pixels da `rom_inst_OR`.
+2.  **Cálculo:** O pixel entra no `coprocessador.v`, passa pelo algoritmo selecionado (ex: Zoom 2x) e sai pelo fio `pixel_coproc_out` junto com um sinal de validade `pixel_coproc_valid`.
+3.  **Escrita:** O resultado é gravado na `ram_inst` (Memória de Saída).
+
+#### **Estágio 3: Arbitragem de Saída (RAM -> VGA ou HPS)**
+Este é o ponto mais complexo do fluxo, localizado nas linhas 230-233 de `processo_imagem.v`. Como a memória RAM só tem uma porta de endereço, o código implementa um **Sistema de Prioridade Estrita**:
+
+1.  **Prioridade Alta (Escrita do Coprocessador):**
+    * Se o coprocessador tiver um pixel pronto (`pixel_coproc_valid`), ele ganha o controle da RAM imediatamente para gravar o dado.
+    * *Endereço:* `pixel_write_count`.
+
+2.  **Prioridade Média (Leitura do HPS):**
+    * Se o coprocessador terminou (`process_done_latch`) **E** o HPS ativou o modo leitura (`SW[4]=1`), o HPS ganha o controle para ler a imagem processada (usado na sua função de salvar BMP).
+    * *Endereço:* `{data_in[3:0], addr_in}` (HPS constrói o endereço de 19 bits).
+
+3.  **Prioridade Baixa (VGA Display):**
+    * Se ninguém mais precisa da RAM, o VGA tem acesso livre para ler e exibir a imagem no monitor.
+    * *Endereço:* `ram_addr_vga_calc` (Calculado com base na varredura X, Y da tela).
+
+
+## HPS
+
+> Enquanto a FPGA faz o processamento massivo e paralelo (calcular a cor de milhares de pixels), o HPS atua como:
+1.  **Tradutor:** Converte arquivos BMP em sinais elétricos.
+2.  **Gerente:** Decide qual algoritmo a FPGA vai rodar agora.
+3.  **Interface:** Traduz movimentos do mouse em comandos de desenho.
+
+###  A Camada de Sistema 
+
+* **Mapeamento de Memória (`init_memory` em `api.s`):**
+    O processador executa chamadas de sistema (`open` e `mmap`) para conectar um endereço de memória virtual do software diretamente ao endereço físico da ponte **Lightweight HPS-to-FPGA** (`0xFF200000`).
+    * *O que acontece:* Isso cria um "túnel" onde qualquer coisa que o software escreva nessa variável especial é enviada fisicamente para os pinos da FPGA.
+
+### A Camada de Driver (Assembly `api.s`)
+
+* **Empacotamento de Comandos (`escrever_pixel_end`):**
+    A FPGA espera receber tudo de uma vez: Endereço, Cor e Controle. O processador usa instruções de deslocamento (`lsl`) e lógica (`orr`) para montar um pacote de 32 bits:
+    * **Bits 0-14:** Endereço do pixel (0 a 32.767).
+    * **Bits 15-22:** Valor da cor do pixel (0 a 255).
+    * **Bit 23:** Sinal de *Write Enable* (Gatilho para gravar).
+    * **Bits 24-31:** Sinais de Controle (Algoritmos/Switches).
+
+* **Protocolo de Leitura "Write-Wait-Read" (`ler_pixel_fpga`):**
+    Como a FPGA é mais lenta que o processador ARM (que roda a quase 1GHz), o HPS precisa gerenciar o tempo:
+    1.  **Solicita:** Escreve o endereço que quer ler no barramento.
+    2.  **Espera:** Executa um loop "vazio" (`delay_addr`) para dar tempo ao sinal elétrico viajar até a FPGA e a memória RAM responder.
+    3.  **Lê:** Só então lê o registrador de entrada (`PIO_INPUT_OFFSET`).
+
+### A Camada de Aplicação (`main.c`)
+
+* **Máquina de Estados do Mouse:**
+    O processador lê continuamente o arquivo `/dev/input/mice`. Ele interpreta os bytes brutos do protocolo PS/2 (movimento X, Y e cliques) e mantém o estado da interface (se o usuário está arrastando, selecionando ou dando zoom).
+
+* **Gerenciamento de Cache Híbrido (`gerar_cache_zooms`):**
+    Esta é a função mais inteligente do HPS. Em vez de calcular o zoom via software (lento) ou pedir à FPGA em tempo real para cada movimento do mouse (complexo), o HPS usa uma estratégia de **Cache**:
+    1.  O HPS configura a FPGA para modo "Zoom 2x" (`set_zoom_2x`).
+    2.  Envia a imagem inteira para a FPGA processar.
+    3.  Lê o resultado processado de volta e salva num arquivo temporário (`saida.bmp`).
+    4.  Repete o processo para o Zoom 4x.
+    * *Resultado:* Quando o usuário usa a lupa, o HPS apenas recorta pedaços dessas imagens já prontas, garantindo uma resposta instantânea na tela.
+
+* **Cálculo de Janela (`aplicar_overlay_bmp`):**
+    Quando você move a janela de zoom, o HPS calcula quais pixels da imagem original devem ser substituídos pelos pixels da imagem de zoom (lida do cache). Ele faz a matemática de coordenadas e envia para a FPGA apenas os pixels dessa região específica, criando o efeito de sobreposição.
+
 
 
 
@@ -284,3 +378,14 @@ O sinal chega no módulo `processo_imagem.v`.
     </figcaption>
   </figure>
 </div>
+
+
+## ✍️ Colaboradores
+
+Este projeto foi desenvolvido por:
+
+- [**Julia Santana**](https://github.com/)
+- [**Maria Clara**](https://github.com/)
+- [**Vitor Dórea**](https://github.com/)
+
+Agradecimentos ao professor **Angelo Duarte** e aos tutores **Wesley** e **Alan**.
