@@ -27,8 +27,6 @@
 • [ Estrutura e ferramentas](#estruturas-e-ferramentas-utilizadas) 
 •  [Fluxo de Dados](#fluxo-de-dados) 
 • [Testes e Resultados](#testes-e_resultados) 
-•  [Referências ](#referencias)
-
 
 </div>
 
