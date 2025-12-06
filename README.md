@@ -17,8 +17,6 @@
 <div align="center">
 
 
-
-
 [Sobre o projeto](#sobre-o-projeto) 
 • [Requisitos](#requisitos) 
 • [Instalação](#instalação) 
@@ -26,11 +24,10 @@
 • [Arquitetura](#arquitetura) 
 • [ Estrutura e ferramentas](#estruturas-e-ferramentas-utilizadas) 
 •  [Fluxo de Dados](#fluxo-de-dados) 
-• [Testes e Resultados](#testes-e_resultados) 
+• [Testes e Resultados](#testes-e-resultados) 
 
 </div>
 
----
 
 ## 📄Sobre o Projeto
 
@@ -105,9 +102,7 @@ A solução geral integra três componentes principais — *HPS (C + Linux), **A
 
 
 
-## ⚙️Arquitetura 
-
-
+## 👩🏻‍💻Arquitetura 
 
 A solução utiliza a arquitetura híbrida da DE1-SoC. O *HPS (ARM Cortex-A9)* executa o Linux e a lógica da aplicação, enquanto a *FPGA* realiza a aceleração gráfica.
 
@@ -203,7 +198,7 @@ rápida edição de arquivos, scripts e outros documentos de texto.
 
 </details>
 
-## Fluxo de dados
+## 🖧 Fluxo de dados
 
 | Sinal         | Descrição | I/O | 
 | ------------- | ------------- |------------- |
@@ -275,8 +270,17 @@ O sinal chega no módulo `processo_imagem.v`.
   </figure>
 </div>
 
-## Testes e Resultados
+## 🔎Testes e resultados
 
 * **Validação da Comunicação:** Foram executados testes de escrita e leitura para assegurar a integridade dos dados trafegados entre o processador HPS e a memória interna da FPGA.
 * **Estabilidade dos Controladores:** Não houve problemas técnicos referentes aos controladores de entrada e saída (drivers do mouse e PIO).
 * **Estratégia de Renderização:** Após a avaliação de diferentes lógicas para o recorte da janela, a equipe optou pela implementação via *overlay*. Esta técnica utiliza duas imagens pré-carregadas no HPS (cache), garantindo fluidez na atualização da janela de zoom.
+
+<div align="center">
+  <figure>  
+    <img src="assets/teste.gif" alt="Teste">
+    <figcaption>
+      <p align="center"><strong>Figura 4</strong> - Exibição  </p>
+    </figcaption>
+  </figure>
+</div>
